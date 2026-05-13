@@ -1,0 +1,185 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess: Enhanced Multiplayer</title>
+    <!-- Firebase SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/9.1.3/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.1.3/firebase-database-compat.js"></script>
+    <style>
+        :root { --light-sq: #f0d9b5; --dark-sq: #b58863; --highlight: rgba(46, 204, 113, 0.6); }
+        body { font-family: 'Segoe UI', sans-serif; background-color: #2c3e50; color: white; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        
+        /* Lobby Styles */
+        #lobby { background: #34495e; padding: 30px; border-radius: 12px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        .menu-btn { background: #e67e22; border: none; padding: 15px 30px; color: white; font-weight: bold; border-radius: 5px; cursor: pointer; margin: 10px; font-size: 18px; }
+        input { padding: 10px; border-radius: 5px; border: none; font-size: 18px; width: 150px; text-align: center; }
+
+        /* Game Styles */
+        #game-container { display: none; gap: 20px; }
+        #board { display: grid; grid-template-columns: repeat(8, 65px); grid-template-rows: repeat(8, 65px); border: 5px solid #1a252f; }
+        .square { width: 65px; height: 65px; display: flex; justify-content: center; align-items: center; font-size: 40px; cursor: pointer; position: relative; }
+        .light { background-color: var(--light-sq); }
+        .dark { background-color: var(--dark-sq); }
+        .valid-move::after { content: ''; width: 18px; height: 18px; background: var(--highlight); border-radius: 50%; position: absolute; }
+        .selected { outline: 4px solid #e74c3c; outline-offset: -4px; z-index: 10; }
+        #ui-panel { background: #34495e; padding: 20px; border-radius: 8px; width: 250px; }
+        .stunned { opacity: 0.4; }
+        .shielded { border: 3px solid #3498db; border-radius: 50%; width: 50px; height: 50px; display: flex; align-items: center; justify-content: center; }
+        .trap { position: absolute; width: 12px; height: 12px; background: #e74c3c; border-radius: 50%; bottom: 5px; right: 5px; }
+    </style>
+</head>
+<body>
+
+    <div id="lobby">
+        <h1>Chess: BETTER Edition</h1>
+        <button class="menu-btn" onclick="createGame()">Create Party</button>
+        <div style="margin: 20px 0;">OR</div>
+        <input type="text" id="join-code" placeholder="Enter Code">
+        <button class="menu-btn" onclick="joinGame()">Join Party</button>
+    </div>
+
+    <div id="game-container">
+        <div>
+            <h3 id="role-display">Waiting for player...</h3>
+            <div id="board"></div>
+        </div>
+        <div id="ui-panel">
+            <h2 id="turn-indicator">White's Turn</h2>
+            <div id="action-log">Your Party Code: <b id="display-code">----</b></div>
+            <div id="special-actions"></div>
+        </div>
+    </div>
+
+<script>
+// --- FIREBASE CONFIG ---
+// NOTE: Replace this with your own Firebase Config from Firebase Console
+const firebaseConfig = {
+    apiKey: "AIzaSyDimKHiFMBA-qEKSTGtB54pllgjEwAbBsc",
+    databaseURL: "https://chess-9b33e-default-rtdb.firebaseio.com",
+    projectId: "chess-9b33e"
+};
+// Initialize Firebase only if config is provided
+let database;
+try {
+    firebase.initializeApp(firebaseConfig);
+    database = firebase.database();
+} catch (e) {
+    console.warn("Firebase not connected. Use your own config to make it live!");
+}
+
+// --- GAME STATE ---
+let gameId = null;
+let myRole = null; // 'white' or 'black'
+let board = [];
+let currentTurn = 'white';
+let selectedSquare = null;
+let validMoves = [];
+let traps = [];
+
+// --- MULTIPLAYER LOGIC ---
+function createGame() {
+    gameId = Math.floor(1000 + Math.random() * 9000).toString();
+    myRole = 'white';
+    initNewBoard();
+    updateFirebase();
+    startListening();
+    showGame();
+}
+
+function joinGame() {
+    gameId = document.getElementById('join-code').value;
+    myRole = 'black';
+    startListening();
+    showGame();
+}
+
+function showGame() {
+    document.getElementById('lobby').style.display = 'none';
+    document.getElementById('game-container').style.display = 'flex';
+    document.getElementById('display-code').innerText = gameId;
+    document.getElementById('role-display').innerText = "You are: " + myRole;
+}
+
+function startListening() {
+    if(!database) return;
+    database.ref('games/' + gameId).on('value', (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+            board = data.board;
+            currentTurn = data.currentTurn;
+            traps = data.traps || [];
+            renderBoard();
+        }
+    });
+}
+
+function updateFirebase() {
+    if(!database) return;
+    database.ref('games/' + gameId).set({
+        board: board,
+        currentTurn: currentTurn,
+        traps: traps
+    });
+}
+
+// --- PIECE LOGIC ---
+function initNewBoard() {
+    board = Array(8).fill().map(() => Array(8).fill(null));
+    const layout = ['Rook', 'Knight', 'Bishop', 'Queen', 'King', 'Bishop', 'Knight', 'Rook'];
+    const syms = {
+        white: {Rook:'♖', Knight:'♘', Bishop:'♗', Queen:'♕', King:'♔', Pawn:'♙'},
+        black: {Rook:'♜', Knight:'♞', Bishop:'♝', Queen:'♛', King:'♚', Pawn:'♟'}
+    };
+
+    for(let i=0; i<8; i++) {
+        board[0][i] = { team:'black', type:layout[i], sym:syms.black[layout[i]], cd:0, stunned:0 };
+        board[1][i] = { team:'black', type:'Pawn', sym:syms.black.Pawn, cd:0, stunned:0 };
+        board[6][i] = { team:'white', team:'white', type:'Pawn', sym:syms.white.Pawn, cd:0, stunned:0 };
+        board[7][i] = { team:'white', type:layout[i], sym:syms.white[layout[i]], cd:0, stunned:0 };
+    }
+}
+
+// (Insert Move Calculation & Render Logic from previous response here...)
+// IMPORTANT: Inside executeMove(), simply add 'updateFirebase()' at the end.
+// Also, wrap handleSquareClick in: if (currentTurn === myRole) { ... }
+
+function renderBoard() {
+    const boardDiv = document.getElementById('board');
+    boardDiv.innerHTML = '';
+    for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+            const sq = document.createElement('div');
+            sq.className = `square ${(r + c) % 2 === 0 ? 'light' : 'dark'}`;
+            if (selectedSquare?.r === r && selectedSquare?.c === c) sq.classList.add('selected');
+            if (validMoves.some(m => m.r === r && m.c === c)) sq.classList.add('valid-move');
+
+            const p = board[r][c];
+            if (p) {
+                const span = document.createElement('span');
+                span.innerText = p.sym;
+                if (p.stunned > 0) span.className = 'stunned';
+                if (p.shielded) span.className = 'shielded';
+                sq.appendChild(span);
+            }
+            sq.onclick = () => {
+                if (currentTurn !== myRole) return;
+                handleSquareClick(r, c);
+            };
+            boardDiv.appendChild(sq);
+        }
+    }
+    document.getElementById('turn-indicator').innerText = currentTurn.toUpperCase() + "'s Turn";
+}
+
+// Placeholder for logic implementation (same as previous)
+function handleSquareClick(r, c) {
+    // ... Move logic as provided before ...
+    // After any move:
+    // updateFirebase();
+}
+
+</script>
+</body>
+</html>
