@@ -1,0 +1,616 @@
+<!DOCTYPE html><!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess: Enhanced Edition</title>
+    <style>
+        :root {
+            --light-sq: #f0d9b5;
+            --dark-sq: #b58863;
+            --highlight: rgba(46, 204, 113, 0.6);
+        }
+        body {
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            background-color: #2c3e50;
+            color: white;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            margin: 0;
+            padding: 20px;
+        }
+        #game-container {
+            display: flex;
+            gap: 20px;
+            align-items: flex-start;
+        }
+        #board {
+            display: grid;
+            grid-template-columns: repeat(8, 70px);
+            grid-template-rows: repeat(8, 70px);
+            border: 4px solid #1a252f;
+            box-shadow: 0 10px 20px rgba(0,0,0,0.5);
+        }
+        .square {
+            width: 70px;
+            height: 70px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 45px;
+            cursor: pointer;
+            position: relative;
+            user-select: none;
+        }
+        .light { background-color: var(--light-sq); color: #000; }
+        .dark { background-color: var(--dark-sq); color: #000; }
+        .selected { outline: 4px solid #e74c3c; outline-offset: -4px; z-index: 10; }
+        
+        /* The Green Dot for Valid Moves */
+        .valid-move::after {
+            content: '';
+            width: 22px; height: 22px;
+            background-color: var(--highlight);
+            border-radius: 50%;
+            position: absolute;
+            z-index: 5;
+        }
+        
+        /* Status Indicators */
+        .stunned { opacity: 0.5; filter: grayscale(100%); }
+        .shielded::before {
+            content: '';
+            position: absolute;
+            width: 80%; height: 80%;
+            border: 3px solid #3498db;
+            border-radius: 50%;
+        }
+        .trap {
+            position: absolute;
+            width: 15px; height: 15px;
+            background-color: #e74c3c;
+            border-radius: 50%;
+            bottom: 5px; right: 5px;
+        }
+
+        #ui-panel {
+            background-color: #34495e;
+            padding: 20px;
+            border-radius: 8px;
+            width: 250px;
+            box-shadow: 0 5px 15px rgba(0,0,0,0.3);
+        }
+        button {
+            background-color: #e67e22;
+            color: white;
+            border: none;
+            padding: 10px;
+            width: 100%;
+            margin-top: 10px;
+            cursor: pointer;
+            border-radius: 4px;
+            font-weight: bold;
+            font-size: 16px;
+        }
+        button:hover { background-color: #d35400; }
+        button:disabled { background-color: #7f8c8d; cursor: not-allowed; }
+    </style>
+</head>
+<body>
+
+    <h1>Chess: Enhanced Edition</h1>
+    <div id="game-container">
+        <div id="board"></div>
+        <div id="ui-panel">
+            <h2 id="turn-indicator">White's Turn</h2>
+            <div id="action-log">Select a piece...</div>
+            <div id="special-actions"></div>
+        </div>
+    </div>
+
+<script>
+// --- GAME LOGIC & STATE ---
+const BOARD_SIZE = 8;
+let board = Array(BOARD_SIZE).fill().map(() => Array(BOARD_SIZE).fill(null));
+let currentTurn = 'white';
+let selectedSquare = null;
+let validMoves = []; // Stores valid moves for the currently selected piece
+let traps = [];
+
+class Piece {
+    constructor(team, type, symbol) {
+        this.team = team;
+        this.type = type;
+        this.symbol = symbol;
+        this.stunnedFor = 0;
+        this.hasShield = false;
+        this.cooldowns = { special: 0 };
+    }
+    tickCooldowns() {
+        if (this.stunnedFor > 0) this.stunnedFor--;
+        if (this.cooldowns.special > 0) this.cooldowns.special--;
+    }
+}
+
+const setupBoard = () => {
+    const layout = [
+        ['Rook', 'Knight', 'Bishop', 'Queen', 'King', 'Bishop', 'Knight', 'Rook'],
+        ['Pawn', 'Pawn', 'Pawn', 'Pawn', 'Pawn', 'Pawn', 'Pawn', 'Pawn']
+    ];
+    const symbols = {
+        white: { Rook: '♖', Knight: '♘', Bishop: '♗', Queen: '♕', King: '♔', Pawn: '♙' },
+        black: { Rook: '♜', Knight: '♞', Bishop: '♝', Queen: '♛', King: '♚', Pawn: '♟' }
+    };
+    for (let c = 0; c < 8; c++) {
+        board[0][c] = new Piece('black', layout[0][c], symbols['black'][layout[0][c]]);
+        board[1][c] = new Piece('black', 'Pawn', symbols['black']['Pawn']);
+        board[7][c] = new Piece('white', layout[0][c], symbols['white'][layout[0][c]]);
+        board[6][c] = new Piece('white', 'Pawn', symbols['white']['Pawn']);
+    }
+};
+
+// --- CALCULATE VALID MOVES ---
+const calculateValidMoves = (piece, r, c) => {
+    const moves = [];
+    const dir = piece.team === 'white' ? -1 : 1; // White moves up (-1), Black moves down (+1)
+    
+    const isEmpty = (tr, tc) => !board[tr][tc];
+    const isEnemy = (tr, tc) => board[tr][tc] && board[tr][tc].team !== piece.team;
+    const isAlly = (tr, tc) => board[tr][tc] && board[tr][tc].team === piece.team;
+
+    // Helper to add a move and return if the path is blocked
+    const checkAndAdd = (tr, tc) => {
+        if (tr >= 0 && tr < 8 && tc >= 0 && tc < 8) {
+            // ROOK EXCEPTION: Can move onto allies to hide them
+            if (isEmpty(tr, tc) || isEnemy(tr, tc) || (isAlly(tr, tc) && piece.type === 'Rook')) {
+                moves.push({r: tr, c: tc});
+                return !isEmpty(tr, tc); // Stop sliding if we hit a piece
+            }
+            return true; // Stop sliding if we hit a non-rook ally
+        }
+        return true; // Stop sliding if out of bounds
+    };
+
+    // Helper for sliding pieces (Rook, Bishop, Queen)
+    const slide = (directions) => {
+        for (let [dr, dc] of directions) {
+            let tr = r + dr, tc = c + dc;
+            while (tr >= 0 && tr < 8 && tc >= 0 && tc < 8) {
+                if (checkAndAdd(tr, tc)) break;
+                tr += dr; tc += dc;
+            }
+        }
+    };
+
+    switch(piece.type) {
+        case 'Pawn':
+            // Move Forward
+            if (r + dir >= 0 && r + dir < 8 && isEmpty(r + dir, c)) {
+                moves.push({r: r + dir, c: c});
+                // Double move from start
+                if ((piece.team === 'white' && r === 6) || (piece.team === 'black' && r === 1)) {
+                    if (isEmpty(r + dir * 2, c)) moves.push({r: r + dir * 2, c: c});
+                }
+            }
+            // Capture Diagonals
+            if (c > 0 && r + dir >= 0 && r + dir < 8 && isEnemy(r + dir, c - 1)) moves.push({r: r + dir, c: c - 1});
+            if (c < 7 && r + dir >= 0 && r + dir < 8 && isEnemy(r + dir, c + 1)) moves.push({r: r + dir, c: c + 1});
+            break;
+        case 'Knight':
+            const jumps = [[-2,-1], [-2,1], [-1,-2], [-1,2], [1,-2], [1,2], [2,-1], [2,1]];
+            for (let [dr, dc] of jumps) checkAndAdd(r + dr, c + dc);
+            break;
+        case 'Bishop':
+            slide([[-1,-1], [-1,1], [1,-1], [1,1]]);
+            break;
+        case 'Rook':
+            slide([[-1,0], [1,0], [0,-1], [0,1]]);
+            break;
+        case 'Queen':
+            slide([[-1,-1], [-1,1], [1,-1], [1,1], [-1,0], [1,0], [0,-1], [0,1]]);
+            break;
+        case 'King':
+            const steps = [[-1,-1], [-1,1], [1,-1], [1,1], [-1,0], [1,0], [0,-1], [0,1]];
+            for (let [dr, dc] of steps) checkAndAdd(r + dr, c + dc);
+            break;
+    }
+    return moves;
+};
+
+// --- RENDER LOGIC ---
+const renderBoard = () => {
+    const boardDiv = document.getElementById('board');
+    boardDiv.innerHTML = '';
+    
+    for (let r = 0; r < BOARD_SIZE; r++) {
+        for (let c = 0; c < BOARD_SIZE; c++) {
+            const sq = document.createElement('div');
+            sq.className = `square ${(r + c) % 2 === 0 ? 'light' : 'dark'}`;
+            
+            // Highlight selected square
+            if (selectedSquare && selectedSquare.r === r && selectedSquare.c === c) {
+                sq.classList.add('selected');
+            }
+            
+            // Highlight valid moves
+            const isValidMove = validMoves.some(m => m.r === r && m.c === c);
+            if (isValidMove) sq.classList.add('valid-move');
+            
+            const piece = board[r][c];
+            if (piece) {
+                let pieceDiv = document.createElement('span');
+                pieceDiv.innerText = piece.symbol;
+                if (piece.stunnedFor > 0) pieceDiv.classList.add('stunned');
+                if (piece.hasShield) pieceDiv.classList.add('shielded');
+                sq.appendChild(pieceDiv);
+            }
+
+            const trap = traps.find(t => t.r === r && t.c === c);
+            if (trap) {
+                let trapDiv = document.createElement('div');
+                trapDiv.className = 'trap';
+                sq.appendChild(trapDiv);
+            }
+
+            sq.addEventListener('click', () => handleSquareClick(r, c));
+            boardDiv.appendChild(sq);
+        }
+    }
+    document.getElementById('turn-indicator').innerText = `${currentTurn.charAt(0).toUpperCase() + currentTurn.slice(1)}'s Turn`;
+};
+
+// --- INTERACTION LOGIC ---
+const handleSquareClick = (r, c) => {
+    const clickedPiece = board[r][c];
+    const actionsDiv = document.getElementById('special-actions');
+
+    // 1. Moving to a Valid Square
+    if (selectedSquare) {
+        const isValid = validMoves.some(m => m.r === r && m.c === c);
+        
+        if (isValid) {
+            executeMove(selectedSquare.r, selectedSquare.c, r, c);
+            return;
+        } 
+        // 2. Switching Selection to another friendly piece
+        else if (clickedPiece && clickedPiece.team === currentTurn && clickedPiece.stunnedFor <= 0) {
+            selectedSquare = {r, c};
+            validMoves = calculateValidMoves(clickedPiece, r, c);
+            document.getElementById('action-log').innerText = `Selected ${clickedPiece.type}.`;
+            showSpecialAbilities(clickedPiece, r, c);
+            renderBoard();
+            return;
+        } 
+        // 3. Deselecting
+        else {
+            selectedSquare = null;
+            validMoves = [];
+            actionsDiv.innerHTML = '';
+            document.getElementById('action-log').innerText = "Deselected.";
+            renderBoard();
+            return;
+        }
+    }
+
+    // 4. Initial Selection
+    if (!selectedSquare && clickedPiece && clickedPiece.team === currentTurn) {
+        if (clickedPiece.stunnedFor > 0) {
+            document.getElementById('action-log').innerText = "Piece is stunned!";
+            return;
+        }
+        selectedSquare = {r, c};
+        validMoves = calculateValidMoves(clickedPiece, r, c);
+        document.getElementById('action-log').innerText = `Selected ${clickedPiece.type}.`;
+        showSpecialAbilities(clickedPiece, r, c);
+        renderBoard();
+    }
+};
+
+const executeMove = (sr, sc, targetR, targetC) => {
+    let movingPiece = board[sr][sc];
+    let targetPiece = board[targetR][targetC];
+
+    document.getElementById('special-actions').innerHTML = '';
+
+    // --- ROOK SPECIAL: Hide allied piece ---
+    if (movingPiece.type === 'Rook' && targetPiece && targetPiece.team === movingPiece.team) {
+        movingPiece.hiddenPiece = targetPiece; 
+        document.getElementById('action-log').innerText = "Rook is hiding an ally!";
+    } 
+    // --- BISHOP SHIELD MECHANIC ---
+    else if (targetPiece && targetPiece.team !== movingPiece.team) {
+        if (targetPiece.hasShield) {
+            targetPiece.hasShield = false; 
+            document.getElementById('action-log').innerText = "Shield broken! Target survives.";
+            selectedSquare = null;
+            validMoves = [];
+            endTurn();
+            return; 
+        }
+    }
+
+    board[targetR][targetC] = movingPiece;
+    board[sr][sc] = movingPiece.hiddenPiece || null; 
+    movingPiece.hiddenPiece = null; 
+
+    // --- KNIGHT TRAP MECHANIC ---
+    const trapIndex = traps.findIndex(t => t.r === targetR && t.c === targetC && t.team !== movingPiece.team);
+    if (trapIndex !== -1) {
+        board[targetR][targetC] = null; 
+        traps.splice(trapIndex, 1); 
+        document.getElementById('action-log').innerText = "Triggered a trap! Piece destroyed.";
+    } else if (movingPiece.type !== 'Rook' || !movingPiece.hiddenPiece) {
+       document.getElementById('action-log').innerText = "Moved successfully.";
+    }
+
+    selectedSquare = null;
+    validMoves = [];
+    endTurn();
+};
+
+const endTurn = () => {
+    board.flat().filter(p => p && p.team === currentTurn).forEach(p => p.tickCooldowns());
+    currentTurn = currentTurn === 'white' ? 'black' : 'white';
+    renderBoard();
+};
+
+// --- SPECIAL ABILITIES UI & LOGIC ---
+const showSpecialAbilities = (piece, r, c) => {
+    const actionsDiv = document.getElementById('special-actions');
+    actionsDiv.innerHTML = '';
+    
+    if (piece.cooldowns.special > 0) {
+        const p = document.createElement('p');
+        p.innerText = `Ability on Cooldown (${piece.cooldowns.special} turns)`;
+        actionsDiv.appendChild(p);
+        return;
+    }
+
+    if (piece.type === 'Pawn') {
+        const btn = document.createElement('button');
+        btn.innerText = "Stun Adjacent Enemies";
+        btn.onclick = () => {
+            let stunned = false;
+            if (c > 0 && board[r][c-1] && board[r][c-1].team !== piece.team) {
+                board[r][c-1].stunnedFor = 2; stunned = true;
+            }
+            if (c < 7 && board[r][c+1] && board[r][c+1].team !== piece.team) {
+                board[r][c+1].stunnedFor = 2; stunned = true;
+            }
+            if (stunned) {
+                piece.cooldowns.special = 2;
+                document.getElementById('action-log').innerText = "Enemies Stunned!";
+                selectedSquare = null; validMoves = []; endTurn();
+            } else alert("No adjacent enemies to stun!");
+        };
+        actionsDiv.appendChild(btn);
+    }
+
+    if (piece.type === 'Knight') {
+        const btn = document.createElement('button');
+        btn.innerText = "Place Trap Here";
+        btn.onclick = () => {
+            traps.push({r: r, c: c, team: piece.team});
+            piece.cooldowns.special = 3;
+            document.getElementById('action-log').innerText = "Trap Placed!";
+            selectedSquare = null; validMoves = []; endTurn();
+        };
+        actionsDiv.appendChild(btn);
+    }
+
+    if (piece.type === 'Bishop') {
+        const btn = document.createElement('button');
+        btn.innerText = "Shield Adjacent Ally";
+        btn.onclick = () => {
+            const directions = [[0,1], [0,-1], [1,0], [-1,0]];
+            let shielded = false;
+            for (let [dr, dc] of directions) {
+                let nr = r + dr, nc = c + dc;
+                if (nr >= 0 && nr < 8 && nc >= 0 && nc < 8) {
+                    let ally = board[nr][nc];
+                    if (ally && ally.team === piece.team && !ally.hasShield) {
+                        ally.hasShield = true; shielded = true; break; 
+                    }
+                }
+            }
+            if (shielded) {
+                piece.cooldowns.special = 3;
+                document.getElementById('action-log').innerText = "Ally Shielded!";
+                selectedSquare = null; validMoves = []; endTurn();
+            } else alert("No unshielded adjacent ally found!");
+        };
+        actionsDiv.appendChild(btn);
+    }
+};
+
+setupBoard();
+renderBoard();
+
+</script>
+</body>
+</html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Chess: Enhanced Multiplayer</title>
+    <!-- Firebase SDKs -->
+    <script src="https://www.gstatic.com/firebasejs/9.1.3/firebase-app-compat.js"></script>
+    <script src="https://www.gstatic.com/firebasejs/9.1.3/firebase-database-compat.js"></script>
+    <style>
+        :root { --light-sq: #f0d9b5; --dark-sq: #b58863; --highlight: rgba(46, 204, 113, 0.6); }
+        body { font-family: 'Segoe UI', sans-serif; background-color: #2c3e50; color: white; display: flex; flex-direction: column; align-items: center; padding: 20px; }
+        
+        /* Lobby Styles */
+        #lobby { background: #34495e; padding: 30px; border-radius: 12px; text-align: center; box-shadow: 0 10px 30px rgba(0,0,0,0.5); }
+        .menu-btn { background: #e67e22; border: none; padding: 15px 30px; color: white; font-weight: bold; border-radius: 5px; cursor: pointer; margin: 10px; font-size: 18px; }
+        input { padding: 10px; border-radius: 5px; border: none; font-size: 18px; width: 150px; text-align: center; }
+
+        /* Game Styles */
+        #game-container { display: none; gap: 20px; }
+        #board { display: grid; grid-template-columns: repeat(8, 65px); grid-template-rows: repeat(8, 65px); border: 5px solid #1a252f; }
+        .square { width: 65px; height: 65px; display: flex; justify-content: center; align-items: center; font-size: 40px; cursor: pointer; position: relative; }
+        .light { background-color: var(--light-sq); }
+        .dark { background-color: var(--dark-sq); }
+        .valid-move::after { content: ''; width: 18px; height: 18px; background: var(--highlight); border-radius: 50%; position: absolute; }
+        .selected { outline: 4px solid #e74c3c; outline-offset: -4px; z-index: 10; }
+        #ui-panel { background: #34495e; padding: 20px; border-radius: 8px; width: 250px; }
+        .stunned { opacity: 0.4; }
+        .shielded { border: 3px solid #3498db; border-radius: 50%; width: 50px; height: 50px; display: flex; align-items: center; justify-content: center; }
+        .trap { position: absolute; width: 12px; height: 12px; background: #e74c3c; border-radius: 50%; bottom: 5px; right: 5px; }
+    </style>
+</head>
+<body>
+
+    <div id="lobby">
+        <h1>Chess: BETTER Edition</h1>
+        <button class="menu-btn" onclick="createGame()">Create Party</button>
+        <div style="margin: 20px 0;">OR</div>
+        <input type="text" id="join-code" placeholder="Enter Code">
+        <button class="menu-btn" onclick="joinGame()">Join Party</button>
+    </div>
+
+    <div id="game-container">
+        <div>
+            <h3 id="role-display">Waiting for player...</h3>
+            <div id="board"></div>
+        </div>
+        <div id="ui-panel">
+            <h2 id="turn-indicator">White's Turn</h2>
+            <div id="action-log">Your Party Code: <b id="display-code">----</b></div>
+            <div id="special-actions"></div>
+        </div>
+    </div>
+
+<script>
+// --- FIREBASE CONFIG ---
+// NOTE: Replace this with your own Firebase Config from Firebase Console
+const firebaseConfig = {
+    apiKey: "AIzaSyDimKHiFMBA-qEKSTGtB54pllgjEwAbBsc",
+    databaseURL: "https://chess-9b33e-default-rtdb.firebaseio.com",
+    projectId: "chess-9b33e"
+};
+// Initialize Firebase only if config is provided
+let database;
+try {
+    firebase.initializeApp(firebaseConfig);
+    database = firebase.database();
+} catch (e) {
+    console.warn("Firebase not connected. Use your own config to make it live!");
+}
+
+// --- GAME STATE ---
+let gameId = null;
+let myRole = null; // 'white' or 'black'
+let board = [];
+let currentTurn = 'white';
+let selectedSquare = null;
+let validMoves = [];
+let traps = [];
+
+// --- MULTIPLAYER LOGIC ---
+function createGame() {
+    gameId = Math.floor(1000 + Math.random() * 9000).toString();
+    myRole = 'white';
+    initNewBoard();
+    updateFirebase();
+    startListening();
+    showGame();
+}
+
+function joinGame() {
+    gameId = document.getElementById('join-code').value;
+    myRole = 'black';
+    startListening();
+    showGame();
+}
+
+function showGame() {
+    document.getElementById('lobby').style.display = 'none';
+    document.getElementById('game-container').style.display = 'flex';
+    document.getElementById('display-code').innerText = gameId;
+    document.getElementById('role-display').innerText = "You are: " + myRole;
+}
+
+function startListening() {
+    if(!database) return;
+    database.ref('games/' + gameId).on('value', (snapshot) => {
+        const data = snapshot.val();
+        if (data) {
+            board = data.board;
+            currentTurn = data.currentTurn;
+            traps = data.traps || [];
+            renderBoard();
+        }
+    });
+}
+
+function updateFirebase() {
+    if(!database) return;
+    database.ref('games/' + gameId).set({
+        board: board,
+        currentTurn: currentTurn,
+        traps: traps
+    });
+}
+
+// --- PIECE LOGIC ---
+function initNewBoard() {
+    board = Array(8).fill().map(() => Array(8).fill(null));
+    const layout = ['Rook', 'Knight', 'Bishop', 'Queen', 'King', 'Bishop', 'Knight', 'Rook'];
+    const syms = {
+        white: {Rook:'♖', Knight:'♘', Bishop:'♗', Queen:'♕', King:'♔', Pawn:'♙'},
+        black: {Rook:'♜', Knight:'♞', Bishop:'♝', Queen:'♛', King:'♚', Pawn:'♟'}
+    };
+
+    for(let i=0; i<8; i++) {
+        board[0][i] = { team:'black', type:layout[i], sym:syms.black[layout[i]], cd:0, stunned:0 };
+        board[1][i] = { team:'black', type:'Pawn', sym:syms.black.Pawn, cd:0, stunned:0 };
+        board[6][i] = { team:'white', team:'white', type:'Pawn', sym:syms.white.Pawn, cd:0, stunned:0 };
+        board[7][i] = { team:'white', type:layout[i], sym:syms.white[layout[i]], cd:0, stunned:0 };
+    }
+}
+
+// (Insert Move Calculation & Render Logic from previous response here...)
+// IMPORTANT: Inside executeMove(), simply add 'updateFirebase()' at the end.
+// Also, wrap handleSquareClick in: if (currentTurn === myRole) { ... }
+
+function renderBoard() {
+    const boardDiv = document.getElementById('board');
+    boardDiv.innerHTML = '';
+    for (let r = 0; r < 8; r++) {
+        for (let c = 0; c < 8; c++) {
+            const sq = document.createElement('div');
+            sq.className = `square ${(r + c) % 2 === 0 ? 'light' : 'dark'}`;
+            if (selectedSquare?.r === r && selectedSquare?.c === c) sq.classList.add('selected');
+            if (validMoves.some(m => m.r === r && m.c === c)) sq.classList.add('valid-move');
+
+            const p = board[r][c];
+            if (p) {
+                const span = document.createElement('span');
+                span.innerText = p.sym;
+                if (p.stunned > 0) span.className = 'stunned';
+                if (p.shielded) span.className = 'shielded';
+                sq.appendChild(span);
+            }
+            sq.onclick = () => {
+                if (currentTurn !== myRole) return;
+                handleSquareClick(r, c);
+            };
+            boardDiv.appendChild(sq);
+        }
+    }
+    document.getElementById('turn-indicator').innerText = currentTurn.toUpperCase() + "'s Turn";
+}
+
+// Placeholder for logic implementation (same as previous)
+function handleSquareClick(r, c) {
+    // ... Move logic as provided before ...
+    // After any move:
+    // updateFirebase();
+}
+
+</script>
+</body>
+</html>
